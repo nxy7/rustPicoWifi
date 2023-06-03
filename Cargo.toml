@@ -4,6 +4,11 @@ name = "embassy-rp-examples"
 version = "0.1.0"
 license = "MIT OR Apache-2.0"
 
+[[bin]]
+name = "main"
+path = "./src/main.rs"
+test = false
+bench = false
 
 [dependencies]
 embassy-embedded-hal = { version = "0.1.0", path = "./embassy/embassy-embedded-hal", features = ["defmt"] }

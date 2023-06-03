@@ -4,6 +4,7 @@
 #![feature(async_fn_in_trait)]
 #![allow(incomplete_features)]
 
+pub mod buzzer;
 use cyw43_pio::PioSpi;
 use defmt::*;
 use embassy_executor::Spawner;
@@ -15,8 +16,8 @@ use embassy_rp::peripherals::{
     DMA_CH0, PIN_16, PIN_17, PIN_18, PIN_20, PIN_23, PIN_25, PIN_28, PIO0, PWM_CH1,
 };
 use embassy_rp::pio::Pio;
-use embassy_rp::{pwm, Peripherals};
-use embassy_time::{Duration, Timer};
+use embassy_rp::pwm;
+use embassy_time::Duration;
 use embedded_io::asynch::Write;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
@@ -45,95 +46,6 @@ async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
     stack.run().await
 }
 
-#[embassy_executor::task]
-async fn buzzer_task(
-    pwmch1: PWM_CH1,
-    p16: PIN_16,
-    p17: PIN_17,
-    p18: PIN_18,
-    p20: PIN_20,
-    p28: PIN_28,
-) {
-    // let a = embassy_rp::gpio::OutputOpenDrain::new(p.PIN_8, Level::High);
-    // let mut buzzer = Output::new(p18, Level::High);
-    let mut button = Input::new(p20, embassy_rp::gpio::Pull::Down);
-    let mut ledpin = Output::new(p28, Level::High);
-
-    let mut rotary_a = Input::new(p16, embassy_rp::gpio::Pull::Up);
-    let mut rotary_b = Input::new(p17, embassy_rp::gpio::Pull::Up);
-
-    let mut pwm_config = pwm::Config::default();
-    pwm_config.top = 0xffff;
-    pwm_config.compare_a = 0x00ef;
-
-    let mut pwm = pwm::Pwm::new_output_a(pwmch1, p18, pwm_config.clone());
-    let mut control_volume = true;
-
-    info!("Buzzer set up");
-    loop {
-        let v = select::select(
-            async {
-                button.wait_for_low().await;
-                button.wait_for_high().await;
-                control_volume = !control_volume;
-                info!("Control volume = {}", control_volume);
-            },
-            async {
-                let r = select::select(
-                    async {
-                        rotary_a.wait_for_rising_edge().await;
-                    },
-                    async {
-                        rotary_b.wait_for_rising_edge().await;
-                    },
-                )
-                .await;
-                match r {
-                    Either::First(()) => {
-                        if rotary_b.is_high() {
-                            info!("turning left");
-                            return (0xff, false);
-                        }
-                        (0, false)
-                    }
-                    Either::Second(()) => {
-                        if rotary_a.is_high() {
-                            info!("turning right");
-                            return (0xff, true);
-                        }
-                        (0, true)
-                    }
-                }
-            },
-        )
-        .await;
-        match v {
-            Either::First(_) => {}
-            Either::Second((v, add)) => match (control_volume, add) {
-                (true, true) => {
-                    pwm_config.compare_a += v;
-                }
-                (true, false) => {
-                    pwm_config.compare_a -= v;
-                }
-                (false, true) => {
-                    pwm_config.top += v;
-                }
-                (false, false) => {
-                    pwm_config.top -= v;
-                }
-            },
-        };
-        if (control_volume) {
-            info!("vol: {}", pwm_config.compare_a);
-        } else {
-            info!("top: {}", pwm_config.top);
-        }
-
-        pwm.set_config(&pwm_config);
-    }
-}
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     info!("Starting program");
@@ -142,7 +54,7 @@ async fn main(spawner: Spawner) {
     let network_password = "QwerFdsa";
 
     let p = embassy_rp::init(Default::default());
-    unwrap!(spawner.spawn(buzzer_task(
+    unwrap!(spawner.spawn(buzzer::buzzer_task(
         p.PWM_CH1, p.PIN_16, p.PIN_17, p.PIN_18, p.PIN_20, p.PIN_28
     )));
 
