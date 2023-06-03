@@ -4,17 +4,19 @@
 #![feature(async_fn_in_trait)]
 #![allow(incomplete_features)]
 
-use core::str::from_utf8;
-
 use cyw43_pio::PioSpi;
 use defmt::*;
 use embassy_executor::Spawner;
+use embassy_futures::select::{self, Either};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{Config, Stack, StackResources};
-use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{DMA_CH0, PIN_23, PIN_25, PIO0};
+use embassy_rp::gpio::{Input, Level, Output};
+use embassy_rp::peripherals::{
+    DMA_CH0, PIN_16, PIN_17, PIN_18, PIN_20, PIN_23, PIN_25, PIN_28, PIO0, PWM_CH1,
+};
 use embassy_rp::pio::Pio;
-use embassy_time::Duration;
+use embassy_rp::{pwm, Peripherals};
+use embassy_time::{Duration, Timer};
 use embedded_io::asynch::Write;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
@@ -43,6 +45,95 @@ async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
     stack.run().await
 }
 
+#[embassy_executor::task]
+async fn buzzer_task(
+    pwmch1: PWM_CH1,
+    p16: PIN_16,
+    p17: PIN_17,
+    p18: PIN_18,
+    p20: PIN_20,
+    p28: PIN_28,
+) {
+    // let a = embassy_rp::gpio::OutputOpenDrain::new(p.PIN_8, Level::High);
+    // let mut buzzer = Output::new(p18, Level::High);
+    let mut button = Input::new(p20, embassy_rp::gpio::Pull::Down);
+    let mut ledpin = Output::new(p28, Level::High);
+
+    let mut rotary_a = Input::new(p16, embassy_rp::gpio::Pull::Up);
+    let mut rotary_b = Input::new(p17, embassy_rp::gpio::Pull::Up);
+
+    let mut pwm_config = pwm::Config::default();
+    pwm_config.top = 0xffff;
+    pwm_config.compare_a = 0x00ef;
+
+    let mut pwm = pwm::Pwm::new_output_a(pwmch1, p18, pwm_config.clone());
+    let mut control_volume = true;
+
+    info!("Buzzer set up");
+    loop {
+        let v = select::select(
+            async {
+                button.wait_for_low().await;
+                button.wait_for_high().await;
+                control_volume = !control_volume;
+                info!("Control volume = {}", control_volume);
+            },
+            async {
+                let r = select::select(
+                    async {
+                        rotary_a.wait_for_rising_edge().await;
+                    },
+                    async {
+                        rotary_b.wait_for_rising_edge().await;
+                    },
+                )
+                .await;
+                match r {
+                    Either::First(()) => {
+                        if rotary_b.is_high() {
+                            info!("turning left");
+                            return (0xff, false);
+                        }
+                        (0, false)
+                    }
+                    Either::Second(()) => {
+                        if rotary_a.is_high() {
+                            info!("turning right");
+                            return (0xff, true);
+                        }
+                        (0, true)
+                    }
+                }
+            },
+        )
+        .await;
+        match v {
+            Either::First(_) => {}
+            Either::Second((v, add)) => match (control_volume, add) {
+                (true, true) => {
+                    pwm_config.compare_a += v;
+                }
+                (true, false) => {
+                    pwm_config.compare_a -= v;
+                }
+                (false, true) => {
+                    pwm_config.top += v;
+                }
+                (false, false) => {
+                    pwm_config.top -= v;
+                }
+            },
+        };
+        if (control_volume) {
+            info!("vol: {}", pwm_config.compare_a);
+        } else {
+            info!("top: {}", pwm_config.top);
+        }
+
+        pwm.set_config(&pwm_config);
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     info!("Starting program");
@@ -51,14 +142,15 @@ async fn main(spawner: Spawner) {
     let network_password = "QwerFdsa";
 
     let p = embassy_rp::init(Default::default());
+    unwrap!(spawner.spawn(buzzer_task(
+        p.PWM_CH1, p.PIN_16, p.PIN_17, p.PIN_18, p.PIN_20, p.PIN_28
+    )));
 
     let fw = include_bytes!("../firmware/43439A0.bin");
     let clm = include_bytes!("../firmware/43439A0_clm.bin");
 
     let pwr = Output::new(p.PIN_23, Level::Low);
     let cs = Output::new(p.PIN_25, Level::High);
-
-    let mut out_pin = Output::new(p.PIN_7, Level::Low);
 
     // let led = Output::new(p.)
     let mut pio = Pio::new(p.PIO0);
@@ -75,21 +167,19 @@ async fn main(spawner: Spawner) {
     let state = singleton!(cyw43::State::new());
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
 
-    unwrap!(spawner.spawn(wifi_task(runner)));
-
     control.init(clm).await;
     control
-        .set_power_management(cyw43::PowerManagementMode::None)
+        .set_power_management(cyw43::PowerManagementMode::Performance)
         .await;
+    info!("Control set up");
+
+    unwrap!(spawner.spawn(wifi_task(runner)));
+    info!("Spawned wifi task");
 
     // control.start_ap_wpa2("piconet", "password", 6).await;
 
     let config = Config::Dhcp(Default::default());
-
-    // Generate random seed
     let seed = 0x0123_4567_89ab_cdef; // chosen by fair dice roll. guarenteed to be random.
-
-    // Init network stack
     let stack = &*singleton!(Stack::new(
         net_device,
         config,
@@ -98,7 +188,9 @@ async fn main(spawner: Spawner) {
     ));
 
     unwrap!(spawner.spawn(net_task(stack)));
+    info!("Spawned net task");
 
+    let mut out_pin = Output::new(p.PIN_7, Level::Low);
     loop {
         match control.join_wpa2(network_id, network_password).await {
             Ok(_) => break,
@@ -112,8 +204,7 @@ async fn main(spawner: Spawner) {
     let mut tx_buffer = [0; 4096];
     let mut buf = [0; 4096];
 
-    let mut led_status = true;
-    control.gpio_set(0, led_status).await;
+    control.gpio_set(0, true).await;
     let ok_msg = r#"
 HTTP/1.1 200 OK
 Content-Length: 2
@@ -140,7 +231,7 @@ err"#;
         info!("Received connection from {:?}", socket.remote_endpoint());
 
         loop {
-            let n = match socket.read(&mut buf).await {
+            let _ = match socket.read(&mut buf).await {
                 Ok(0) => {
                     warn!("read EOF");
                     break;
