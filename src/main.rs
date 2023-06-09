@@ -8,15 +8,11 @@ pub mod buzzer;
 use cyw43_pio::PioSpi;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_futures::select::{self, Either};
 use embassy_net::tcp::TcpSocket;
-use embassy_net::{Config, Stack, StackResources};
-use embassy_rp::gpio::{Input, Level, Output};
-use embassy_rp::peripherals::{
-    DMA_CH0, PIN_16, PIN_17, PIN_18, PIN_20, PIN_23, PIN_25, PIN_28, PIO0, PWM_CH1,
-};
+use embassy_net::{Config, DhcpConfig, Stack, StackResources};
+use embassy_rp::gpio::{Level, Output};
+use embassy_rp::peripherals::{DMA_CH0, PIN_23, PIN_25, PIO0};
 use embassy_rp::pio::Pio;
-use embassy_rp::pwm;
 use embassy_time::Duration;
 use embedded_io::asynch::Write;
 use static_cell::StaticCell;
@@ -54,12 +50,12 @@ async fn main(spawner: Spawner) {
     let network_password = "QwerFdsa";
 
     let p = embassy_rp::init(Default::default());
-    unwrap!(spawner.spawn(buzzer::buzzer_task(
-        p.PWM_CH1, p.PIN_16, p.PIN_17, p.PIN_18, p.PIN_20, p.PIN_28
-    )));
+    // unwrap!(spawner.spawn(buzzer::buzzer_task(
+    //     p.PWM_CH1, p.PIN_16, p.PIN_17, p.PIN_18, p.PIN_20, p.PIN_28
+    // )));
 
     let fw = include_bytes!("../firmware/43439A0.bin");
-    let clm = include_bytes!("../firmware/43439A0_clm.bin");
+    let clm = include_bytes!("../embassy/cyw43-firmware/43439A0_clm.bin");
 
     let pwr = Output::new(p.PIN_23, Level::Low);
     let cs = Output::new(p.PIN_25, Level::High);
@@ -79,18 +75,14 @@ async fn main(spawner: Spawner) {
     let state = singleton!(cyw43::State::new());
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
 
+    unwrap!(spawner.spawn(wifi_task(runner)));
     control.init(clm).await;
     control
-        .set_power_management(cyw43::PowerManagementMode::Performance)
+        .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
-    info!("Control set up");
-
-    unwrap!(spawner.spawn(wifi_task(runner)));
-    info!("Spawned wifi task");
-
-    // control.start_ap_wpa2("piconet", "password", 6).await;
 
     let config = Config::Dhcp(Default::default());
+
     let seed = 0x0123_4567_89ab_cdef; // chosen by fair dice roll. guarenteed to be random.
     let stack = &*singleton!(Stack::new(
         net_device,
@@ -102,7 +94,10 @@ async fn main(spawner: Spawner) {
     unwrap!(spawner.spawn(net_task(stack)));
     info!("Spawned net task");
 
-    let mut out_pin = Output::new(p.PIN_7, Level::Low);
+    let mut alarm_device_pin = Output::new(p.PIN_7, Level::Low);
+    let mut beemo_l_eye_pin = Output::new(p.PIN_8, Level::Low);
+    let mut beemo_r_eye_pin = Output::new(p.PIN_9, Level::Low);
+
     loop {
         match control.join_wpa2(network_id, network_password).await {
             Ok(_) => break,
@@ -165,12 +160,16 @@ err"#;
             let res_status = match path {
                 "/on" => {
                     control.gpio_set(0, true).await;
-                    out_pin.set_high();
+                    alarm_device_pin.set_high();
+                    beemo_l_eye_pin.set_high();
+                    beemo_r_eye_pin.set_high();
                     socket.write_all(ok_msg.as_bytes()).await
                 }
                 "/off" => {
                     control.gpio_set(0, false).await;
-                    out_pin.set_low();
+                    alarm_device_pin.set_low();
+                    beemo_l_eye_pin.set_low();
+                    beemo_r_eye_pin.set_low();
                     socket.write_all(ok_msg.as_bytes()).await
                 }
                 _ => socket.write_all(err_msg.as_bytes()).await,

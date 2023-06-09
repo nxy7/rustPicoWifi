@@ -10,10 +10,6 @@
       overlays = [ (import rust-overlay) ];
       pkgs = import nixpkgs { inherit system overlays; };
     in {
-
-      packages.x86_64-linux.hello = nixpkgs.legacyPackages.x86_64-linux.hello;
-      packages.x86_64-linux.default = self.packages.x86_64-linux.hello;
-
       devShells.${system}.default = pkgs.mkShell {
         PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
 
